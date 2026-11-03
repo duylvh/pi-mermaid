@@ -83,12 +83,20 @@ piMermaid({
 onSessionStart({}, { ui });
 setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 
-function renderPng(source: string): { data: string; width: number; height: number } {
+type Strip = { data: string; height: number };
+
+/** The diagram's strips, top to bottom, as the transformer emits them. */
+function renderStrips(source: string): { strips: Strip[]; width: number; height: number } {
 	const output = transform(`\`\`\`mermaid\n${source}\n\`\`\``, { messageType: "assistant", isStreaming: false, availableWidth: 400 });
-	const data = [...output.matchAll(/\x1b_G[^;]*;([^\x1b]*)\x1b\\/g)].map((m) => m[1]).join("");
-	if (!data) throw new Error(`no image for:\n${output.slice(0, 300)}`);
-	const png = Buffer.from(data, "base64");
-	return { data, width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
+	const strips = output
+		.split("\n\n")
+		.filter((paragraph) => paragraph.includes("\x1b_G"))
+		.map((paragraph) => [...paragraph.matchAll(/\x1b_G[^;]*;([^\x1b]*)\x1b\\/g)].map((m) => m[1]).join(""))
+		.map((data) => ({ data, png: Buffer.from(data, "base64") }));
+	if (strips.length === 0) throw new Error(`no image for:\n${output.slice(0, 300)}`);
+	const width = strips[0]!.png.readUInt32BE(16);
+	const list = strips.map(({ data, png }) => ({ data, height: png.readUInt32BE(20) }));
+	return { strips: list, width, height: list.reduce((sum, strip) => sum + strip.height, 0) };
 }
 
 function systemEntry(name: string, background: string, foreground: string): Entry {
@@ -106,10 +114,18 @@ const renderEntry = (entry: Entry) => {
 	ui.theme = entry.theme;
 	let x = 12;
 	const images = SAMPLES.map((source) => {
-		const png = renderPng(source);
-		const scale = Math.min(1, (CELL_H - 16) / png.height);
-		const w = png.width * scale;
-		const tag = `<image x="${x}" y="${y + LABEL_H}" width="${w}" height="${png.height * scale}" href="data:image/png;base64,${png.data}"/>`;
+		const diagram = renderStrips(source);
+		const scale = Math.min(1, (CELL_H - 16) / diagram.height);
+		const w = diagram.width * scale;
+		let top = y + LABEL_H;
+		const tag = diagram.strips
+			.map((strip) => {
+				const bottom = Math.round(top + strip.height * scale);
+				const image = `<image x="${x}" y="${Math.round(top)}" width="${w}" height="${bottom - Math.round(top)}" preserveAspectRatio="none" href="data:image/png;base64,${strip.data}"/>`;
+				top += strip.height * scale;
+				return image;
+			})
+			.join("");
 		x += w + 24;
 		return tag;
 	});

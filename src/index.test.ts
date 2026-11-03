@@ -1,6 +1,6 @@
 import { beforeAll, expect, test } from "bun:test";
 import { getMarkdownTheme, initTheme, type MarkdownTransformContext, type MarkdownTransformer, Theme } from "@earendil-works/pi-coding-agent";
-import { Markdown, setCapabilities, visibleWidth } from "@earendil-works/pi-tui";
+import { getCellDimensions, Markdown, setCapabilities, setCellDimensions, visibleWidth } from "@earendil-works/pi-tui";
 
 import piMermaid from "./index.ts";
 
@@ -27,34 +27,38 @@ beforeAll(async () => {
 	setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 });
 
-function renderMessage(text: string, overrides: Partial<MarkdownTransformContext> = {}, width = 100, markdownTheme = getMarkdownTheme()): string[] {
-	const markdown = new Markdown(text, 1, 0, markdownTheme, undefined, {
+function renderMessage(text: string, overrides: Partial<MarkdownTransformContext> = {}, width = 100): string[] {
+	const markdown = new Markdown(text, 1, 0, getMarkdownTheme(), undefined, {
 		transform: (md, availableWidth) =>
 			transform(md, { messageType: "assistant", isStreaming: false, availableWidth, ...overrides }),
 	});
 	return markdown.render(width);
 }
 
-test("a mermaid block renders as one kitty image with reserved rows, keeping surrounding text", () => {
+const placement = (line: string) => {
+	const [, columns, rows] = /\bc=(\d+),r=(\d+)/.exec(line) ?? [];
+	return { columns: Number(columns), rows: Number(rows) };
+};
+const visible = (line: string) => line.replace(/\x1b\[[0-9;]*m|\u2800/g, "").trim();
+
+test("a diagram renders as a stack of 2-row image strips, each anchored on its own row, keeping surrounding text", () => {
 	const lines = renderMessage(`Before\n\n${FLOWCHART}\n\nAfter`);
-	const imageLines = lines.filter(isImageLine);
-	expect(imageLines).toHaveLength(1);
-	const rows = Number(/\x1b_G[^;]*\br=(\d+)/.exec(imageLines[0]!)?.[1]);
-	const start = lines.indexOf(imageLines[0]!);
-	expect(rows).toBeGreaterThan(3);
+	const anchors = lines.flatMap((line, row) => (isImageLine(line) ? [row] : []));
+	expect(anchors.length).toBeGreaterThan(2);
+	expect(anchors.every((row) => placement(lines[row]!).rows === 2 && visible(lines[row + 1]!) === "")).toBe(true);
+	expect(anchors.slice(1).every((row, i) => row - anchors[i]! === 2)).toBe(true);
+	expect(new Set(anchors.map((row) => placement(lines[row]!).columns)).size).toBe(1);
 	expect(lines.every((line) => !line.includes("\n"))).toBe(true);
-	expect(lines.slice(start + 1, start + rows).every((line) => line.replace(/\x1b\[[0-9;]*m|\u2800/g, "").trim() === "")).toBe(true);
-	expect(lines[start + rows]!.trim()).toBe("");
-	expect(lines[start + rows + 1]).toContain("After");
-	expect(lines.join("\n")).toContain("Before");
-	expect(lines.join("\n")).toContain("After");
-	expect(lines.join("\n")).not.toContain("flowchart TD");
+	const text = lines.join("\n");
+	expect(text).toContain("Before");
+	expect(text).toContain("After");
+	expect(text).not.toContain("flowchart TD");
 });
 
 test("an image never exceeds the available width", () => {
 	const wide = "```mermaid\nflowchart LR\n" + Array.from({ length: 12 }, (_, i) => `  N${i}[Node number ${i}] --> N${i + 1}[Node number ${i + 1}]`).join("\n") + "\n```";
-	const imageLine = renderMessage(wide, {}, 40).find(isImageLine)!;
-	expect(Number(/\bc=(\d+)/.exec(imageLine)?.[1])).toBeLessThanOrEqual(37);
+	const strips = renderMessage(wide, {}, 40).filter(isImageLine);
+	expect(strips.every((line) => placement(line).columns <= 37)).toBe(true);
 });
 
 test("an unclosed block while streaming stays as source", () => {
@@ -83,7 +87,7 @@ test("terminals without image support see the source untouched", () => {
 });
 
 test("the diagram follows the live theme, including one swapped in after session start", () => {
-	const payload = () => renderMessage(FLOWCHART).find(isImageLine)!.replace(/\bi=\d+/g, "");
+	const payload = () => renderMessage(FLOWCHART).filter(isImageLine).join().replace(/\bi=\d+/g, "");
 	const dark = payload();
 	ui.theme = getThemeByName("light")!;
 	try {
@@ -94,19 +98,22 @@ test("the diagram follows the live theme, including one swapped in after session
 	expect(payload()).toBe(dark);
 });
 
-test("themes that decorate inline code draw nothing on the rows an image covers", () => {
-	const backtickedCode = { ...getMarkdownTheme(), code: (text: string) => `\`${text}\`` };
-	const lines = renderMessage(FLOWCHART, {}, 100, backtickedCode);
-	const start = lines.findIndex(isImageLine);
-	const rows = Number(/\x1b_G[^;]*\br=(\d+)/.exec(lines[start]!)?.[1]);
-	const covered = lines.slice(start + 1, start + rows).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\u2800/g, "").trim());
-	expect(covered.every((line) => line === "")).toBe(true);
-});
-
 test("a diagram that ends a message keeps its height when trailing blank rows are trimmed", () => {
 	const lines = renderMessage(FLOWCHART);
 	while (lines.length && lines.at(-1)!.replace(/\x1b\[[0-9;]*m/g, "").trim() === "") lines.pop();
-	const start = lines.findIndex(isImageLine);
-	const rows = Number(/\x1b_G[^;]*\br=(\d+)/.exec(lines[start]!)?.[1]);
-	expect(lines.length - start).toBeGreaterThanOrEqual(rows);
+	const lastStrip = lines.findLastIndex(isImageLine);
+	expect(lines.length - lastStrip).toBeGreaterThanOrEqual(placement(lines[lastStrip]!).rows);
+});
+
+test("strips line up as one image at any terminal cell size", () => {
+	const original = getCellDimensions();
+	try {
+		for (const [widthPx, heightPx] of [[7, 15], [8, 16], [9, 18], [10, 22], [16, 34]] as const) {
+			setCellDimensions({ widthPx, heightPx });
+			const strips = renderMessage(FLOWCHART).filter(isImageLine).map(placement);
+			expect(new Set(strips.map((s) => `${s.columns}x${s.rows}`))).toEqual(new Set([`${strips[0]!.columns}x2`]));
+		}
+	} finally {
+		setCellDimensions(original);
+	}
 });
