@@ -12,7 +12,12 @@ type Laid = { ok: true; layout: Layout } | { ok: false; error: string };
 
 const lexer = new Marked();
 const layouts = new Map<string, Laid>();
-const stripImages = new Map<string, Image[]>();
+/** A diagram's strips at one column count; `render(renderWidth)` yields each strip's Kitty sequence. */
+interface StripSet {
+	images: Image[];
+	renderWidth: number;
+}
+const stripSets = new Map<string, StripSet>();
 
 function remember<V>(cache: Map<string, V>, key: string, make: () => V): V {
 	const hit = cache.get(key);
@@ -125,8 +130,8 @@ const fittedColumns = (layout: Layout, availableWidth: number) =>
  * U+2800 row follows the last strip: it draws nothing but is not whitespace, so renderers that trim
  * blank rows at a message's edges after stripping escape sequences (pi-geek-tui does) keep them.
  */
-function diagramMarkdown(strips: Image[], columns: number): string {
-	const rows = strips.map((strip) => codeSpan(`\u2800${strip.render(columns + 2)[0] ?? ""}`));
+function diagramMarkdown({ images, renderWidth }: StripSet): string {
+	const rows = images.map((strip) => codeSpan(`\u2800${strip.render(renderWidth)[0] ?? ""}`));
 	return `${rows.join("\n\n")}\n\n\u2800\n\n`;
 }
 
@@ -135,13 +140,14 @@ function diagramMarkdown(strips: Image[], columns: number): string {
  * no resampling softens the text and no strip is scaled differently from its neighbours. A narrower
  * pane re-rasterizes at a smaller scale rather than shrinking the image.
  */
-function createStrips(layout: Layout, columns: number, fallbackColor: (text: string) => string): Image[] {
+function createStrips(layout: Layout, columns: number, fallbackColor: (text: string) => string): StripSet {
 	const cell = getCellDimensions();
 	const width = columns * cell.widthPx;
 	const raster = rasterize(layout, width / layout.width);
-	return sliceStrips(raster, width, STRIP_ROWS * cell.heightPx).map(
+	const images = sliceStrips(raster, width, STRIP_ROWS * cell.heightPx).map(
 		(base64) => new Image(base64, "image/png", { fallbackColor }, { maxWidthCells: columns, maxHeightCells: STRIP_ROWS }),
 	);
+	return { images, renderWidth: columns + 2 };
 }
 
 export default function piMermaid(pi: ExtensionAPI) {
@@ -149,9 +155,15 @@ export default function piMermaid(pi: ExtensionAPI) {
 	let warnedAboutCore = false;
 
 	// Rex drops uploaded Kitty image data when a pane is resized, while pi-tui only re-places images it
-	// already uploaded. Invalidated strips register a new transmission, so pi-tui uploads them again.
+	// already uploaded. Re-rendering a strip registers a new transmission for its image id, so the next
+	// frame uploads it again even when the rendered line is unchanged, as after a height-only resize.
 	const reuploadStrips = () => {
-		for (const strips of stripImages.values()) for (const strip of strips) strip.invalidate();
+		for (const { images, renderWidth } of stripSets.values()) {
+			for (const strip of images) {
+				strip.invalidate();
+				strip.render(renderWidth);
+			}
+		}
 	};
 	process.stdout.on("resize", reuploadStrips);
 	pi.on("session_shutdown", () => {
@@ -200,8 +212,7 @@ export default function piMermaid(pi: ExtensionAPI) {
 				const columns = fittedColumns(layout, context.availableWidth);
 				const cell = getCellDimensions();
 				const stripsKey = `${context.messageId ?? "live"}|${ordinal++}|${columns}|${cell.widthPx}x${cell.heightPx}|${key}`;
-				const strips = remember(stripImages, stripsKey, () => createStrips(layout, columns, (s) => theme.fg("muted", s)));
-				return diagramMarkdown(strips, columns);
+				return diagramMarkdown(remember(stripSets, stripsKey, () => createStrips(layout, columns, (s) => theme.fg("muted", s))));
 			})
 			.join("");
 	});
