@@ -114,11 +114,12 @@ const naturalColumns = (layout: Layout) => Math.max(1, Math.ceil(layout.width / 
  * paragraph, so the blank row after it is the strip's second row.
  *
  * A strip sits in a code span because themes style a code span as one unit, while text styling such as
- * number highlighting would split the escape sequence. The trailing U+2800 row reserves the last
- * strip's second row even when a renderer trims trailing blank rows, since it is not whitespace.
+ * number highlighting would split the escape sequence. Each strip row starts with U+2800 and a
+ * U+2800 row follows the last strip: it draws nothing but is not whitespace, so renderers that trim
+ * blank rows at a message's edges after stripping escape sequences (pi-geek-tui does) keep them.
  */
 function diagramMarkdown(strips: Image[], columns: number): string {
-	const rows = strips.map((strip) => codeSpan(`\u00a0${strip.render(columns + 2)[0] ?? ""}`));
+	const rows = strips.map((strip) => codeSpan(`\u2800${strip.render(columns + 2)[0] ?? ""}`));
 	return `${rows.join("\n\n")}\n\n\u2800\n\n`;
 }
 

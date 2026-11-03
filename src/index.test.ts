@@ -98,9 +98,13 @@ test("the diagram follows the live theme, including one swapped in after session
 	expect(payload()).toBe(dark);
 });
 
-test("a diagram that ends a message keeps its height when trailing blank rows are trimmed", () => {
+test("a diagram survives renderers that trim blank rows at a message's edges", () => {
+	const blank = (line: string) => line.replace(/\x1b_G[^\x1b]*\x1b\\|\x1b\[[0-9;]*m/g, "").trim() === "";
 	const lines = renderMessage(FLOWCHART);
-	while (lines.length && lines.at(-1)!.replace(/\x1b\[[0-9;]*m/g, "").trim() === "") lines.pop();
+	const strips = lines.filter(isImageLine).length;
+	while (lines.length && blank(lines[0]!)) lines.shift();
+	while (lines.length && blank(lines.at(-1)!)) lines.pop();
+	expect(lines.filter(isImageLine)).toHaveLength(strips);
 	const lastStrip = lines.findLastIndex(isImageLine);
 	expect(lines.length - lastStrip).toBeGreaterThanOrEqual(placement(lines[lastStrip]!).rows);
 });
