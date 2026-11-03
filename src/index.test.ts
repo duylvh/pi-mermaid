@@ -86,6 +86,7 @@ test("each image is uploaded once, and again after a resize", () => {
 	const [{ id }] = uploads() as [Upload];
 	process.stdout.emit("resize");
 	expect(uploads().filter((upload) => upload.id === id)).toHaveLength(2);
+	expect(terminal.join("")).toContain("\x1b[16t");
 });
 
 test("images are drawn pixel for pixel at any terminal cell size", () => {

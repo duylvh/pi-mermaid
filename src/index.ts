@@ -159,6 +159,8 @@ function uploadSequence({ id, png, columns, rows }: Diagram): string {
 	return sequence;
 }
 
+const CELL_SIZE_QUERY = "\x1b[16t";
+
 const deleteSequence = (id: number) => `\x1b_Ga=d,d=I,i=${id},q=2\x1b\\`;
 
 /**
@@ -212,9 +214,13 @@ export default function piMermaid(pi: ExtensionAPI) {
 		uploaded.add(diagram.id);
 		process.stdout.write(uploadSequence(diagram));
 	};
+	// pi-tui asks for the cell size only at startup, but a pane's cells change size when it first shows
+	// on screen or moves to a display with another scale. Asking again on resize lets pi-tui take the
+	// answer and redraw, so diagrams are rasterized for the cells the terminal really draws.
 	const reupload = () => {
 		uploaded.clear();
 		for (const diagram of diagrams.values()) upload(diagram);
+		process.stdout.write(CELL_SIZE_QUERY);
 	};
 	const forget = (diagram: Diagram) => {
 		uploaded.delete(diagram.id);
