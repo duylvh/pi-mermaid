@@ -109,15 +109,31 @@ function codeSpan(content: string): string {
 
 const escapeMarkdown = (text: string) => text.replace(/[!-/:-@[-`{-~]/g, "\\$&");
 
-/** Largest zoom over terminal-sized text: a diagram grows with the pane up to this, then stops. */
-const MAX_ZOOM = 1.5;
+/** Largest glyph size over the terminal's own: a diagram grows with the pane up to this, then stops. */
+const MAX_ZOOM = 1.2;
 
-/** Columns at which diagram text is exactly terminal text: one character per cell. */
-const naturalColumns = (layout: Layout) => Math.max(1, Math.ceil(layout.width / UNITS_PER_CELL));
+/** Below this many pixels per glyph, rounding the advance down would shrink a diagram too much. */
+const MIN_WHOLE_ADVANCE_PX = 4;
 
-/** Fill the pane up to MAX_ZOOM; shrink below terminal-sized text only when the pane is narrower. */
-const fittedColumns = (layout: Layout, availableWidth: number) =>
-	Math.max(1, Math.min(availableWidth - 1, Math.round(naturalColumns(layout) * MAX_ZOOM)));
+interface Fit {
+	/** Pixels from SVG units: one glyph advance is a whole number of pixels where possible. */
+	scale: number;
+	columns: number;
+}
+
+/**
+ * Size a diagram so a label glyph is a whole number of pixels wide, no wider than MAX_ZOOM times the
+ * terminal's own glyph, and narrower only when the pane cannot fit it. A whole-pixel advance keeps every
+ * glyph stem on the pixel grid.
+ */
+function fit(layout: Layout, availableWidth: number, cellWidthPx: number): Fit {
+	const characters = layout.width / UNITS_PER_CELL;
+	const largest = Math.max(1, Math.floor(cellWidthPx * MAX_ZOOM));
+	const fitting = ((availableWidth - 1) * cellWidthPx) / characters;
+	const advance = fitting >= largest ? largest : fitting >= MIN_WHOLE_ADVANCE_PX ? Math.floor(fitting) : fitting;
+	const scale = advance / UNITS_PER_CELL;
+	return { scale, columns: Math.max(1, Math.ceil((layout.width * scale) / cellWidthPx)) };
+}
 
 /**
  * A diagram is drawn as a stack of short image strips rather than one tall image. A Kitty image only
@@ -140,10 +156,10 @@ function diagramMarkdown({ images, renderWidth }: StripSet): string {
  * no resampling softens the text and no strip is scaled differently from its neighbours. A narrower
  * pane re-rasterizes at a smaller scale rather than shrinking the image.
  */
-function createStrips(layout: Layout, columns: number, fallbackColor: (text: string) => string): StripSet {
+function createStrips(layout: Layout, { scale, columns }: Fit, fallbackColor: (text: string) => string): StripSet {
 	const cell = getCellDimensions();
 	const width = columns * cell.widthPx;
-	const raster = rasterize(layout, width / layout.width);
+	const raster = rasterize(layout, scale);
 	const images = sliceStrips(raster, width, STRIP_ROWS * cell.heightPx).map(
 		(base64) => new Image(base64, "image/png", { fallbackColor }, { maxWidthCells: columns, maxHeightCells: STRIP_ROWS }),
 	);
@@ -209,10 +225,10 @@ export default function piMermaid(pi: ExtensionAPI) {
 					return `${token.raw}\n\n${theme.fg("warning", escapeMarkdown(`Mermaid diagram not rendered: ${laid.error}`))}\n\n`;
 				}
 				const { layout } = laid;
-				const columns = fittedColumns(layout, context.availableWidth);
 				const cell = getCellDimensions();
-				const stripsKey = `${context.messageId ?? "live"}|${ordinal++}|${columns}|${cell.widthPx}x${cell.heightPx}|${key}`;
-				return diagramMarkdown(remember(stripSets, stripsKey, () => createStrips(layout, columns, (s) => theme.fg("muted", s))));
+				const size = fit(layout, context.availableWidth, cell.widthPx);
+				const stripsKey = `${context.messageId ?? "live"}|${ordinal++}|${size.scale}|${cell.widthPx}x${cell.heightPx}|${key}`;
+				return diagramMarkdown(remember(stripSets, stripsKey, () => createStrips(layout, size, (s) => theme.fg("muted", s))));
 			})
 			.join("");
 	});

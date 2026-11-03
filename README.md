@@ -11,7 +11,7 @@ Each closed ```` ```mermaid ```` fence in a user or assistant message becomes a 
 
 Diagrams are rasterized at the cell size the terminal reports, so each strip is exactly `columns x cellWidth` by `2 x cellHeight` pixels and the terminal draws it 1:1. No resampling blurs the labels, and strips meet without seams. A narrower pane re-rasterizes at a smaller scale instead of shrinking the image.
 
-Labels are set in a monospace font and measured in terminal cells. A diagram grows with the pane up to 1.5x terminal-text size (a label of N characters spans up to 1.5N columns), and shrinks below that only when the pane is narrower. Spacing between nodes and ranks is tighter than Pele's defaults; a diagram's own frontmatter `config` still overrides it. Diagrams shrink to fit narrow panes.
+Labels are set in a monospace font and measured in terminal cells. A diagram grows with the pane up to 1.2x terminal-text size, and shrinks below that only when the pane is narrower. The size is chosen so every label glyph is a whole number of pixels wide, and labels are placed on whole pixels, so stems land on the pixel grid. Each glyph also gets a thin stroke in its own color, standing in for the stem darkening macOS applies to terminal text, so light text on a dark theme does not look thin and ragged. Spacing between nodes and ranks is tighter than Pele's defaults; a diagram's own frontmatter `config` still overrides it. Diagrams shrink to fit narrow panes.
 
 Some terminals, Rex among them, drop uploaded image data when a pane is resized, while pi-tui only re-places images it already uploaded. pi-mermaid re-registers every strip on resize, so pi-tui uploads them again and diagrams stay visible through width and height changes.
 

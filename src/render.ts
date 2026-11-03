@@ -69,8 +69,54 @@ export function layoutDiagram(source: string, palette: Palette): Layout {
 	return { svg: resolveCssVars(svg, { ...palette, ...FONT_VARS }), width };
 }
 
+/** Stroke added around glyphs, in output pixels, standing in for the stem darkening macOS gives terminal text. */
+const STEM_DARKENING_PX = 0.35;
+
+/**
+ * Prepare labels for an unhinted rasterizer at a known scale. Each label's left edge and baseline go on a
+ * whole output pixel, so with a whole-pixel glyph advance every stem lands on the pixel grid, and each
+ * glyph is stroked in its own inherited fill so thin light-on-dark text keeps its weight.
+ */
+function crispText(svg: string, scale: number): string {
+	type Scope = { fill: string; fontSize: number; offset: [number, number] | undefined };
+	const scopes: Scope[] = [{ fill: "#000", fontSize: PELE_FONT_SIZE, offset: [0, 0] }];
+	const pixel = (value: number) => Math.round(value * scale) / scale;
+	return svg.replace(
+		/<(\/?)([a-zA-Z]+)([^>]*?)(\/?)>([^<]*)/g,
+		(tag, closing: string, name: string, attrs: string, selfClosing: string, content: string) => {
+			if (closing) {
+				scopes.pop();
+				return tag;
+			}
+			const parent = scopes.at(-1)!;
+			const fill = /\bfill="([^"]+)"/.exec(attrs)?.[1] ?? parent.fill;
+			const fontSize = Number(/\bfont-size="([\d.]+)"/.exec(attrs)?.[1] ?? parent.fontSize);
+			const transform = /\btransform="([^"]*)"/.exec(attrs)?.[1];
+			const translate = transform && /^\s*translate\(\s*([\d.e+-]+)(?:[\s,]+([\d.e+-]+))?\s*\)\s*$/.exec(transform);
+			const offset: Scope["offset"] = !transform
+				? parent.offset
+				: translate && parent.offset
+					? [parent.offset[0] + Number(translate[1]), parent.offset[1] + Number(translate[2] ?? 0)]
+					: undefined;
+			if (!selfClosing) scopes.push({ fill, fontSize, offset });
+			if (name !== "text") return tag;
+			let snapped = attrs;
+			if (offset) {
+				const anchor = /\btext-anchor="(middle|end)"/.exec(attrs)?.[1];
+				const width = visibleWidth(content) * fontSize * MONO_ADVANCE;
+				const lead = anchor === "middle" ? width / 2 : anchor === "end" ? width : 0;
+				snapped = attrs
+					.replace(/\bx="([\d.e+-]+)"/, (_, x: string) => `x="${pixel(offset[0] + Number(x) - lead) + lead - offset[0]}"`)
+					.replace(/\by="([\d.e+-]+)"/, (_, y: string) => `y="${pixel(offset[1] + Number(y)) - offset[1]}"`);
+			}
+			const stroke = ` stroke="${fill}" stroke-width="${STEM_DARKENING_PX / scale}" stroke-linejoin="round" paint-order="stroke"`;
+			return `<text${snapped}${stroke}${selfClosing}>${content}`;
+		},
+	);
+}
+
 export function rasterize(layout: Layout, scale: number): Raster {
-	const image = new Resvg(layout.svg, { fitTo: { mode: "zoom", value: scale }, font: fontOptions }).render();
+	const image = new Resvg(crispText(layout.svg, scale), { fitTo: { mode: "zoom", value: scale }, font: fontOptions }).render();
 	return { pixels: Buffer.from(image.pixels), widthPx: image.width, heightPx: image.height };
 }
 

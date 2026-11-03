@@ -55,9 +55,9 @@ test("a diagram renders as a stack of 2-row image strips, each anchored on its o
 	expect(text).not.toContain("flowchart TD");
 });
 
-test("a diagram grows with the pane up to 1.5x terminal text size and shrinks to fit a narrow pane", () => {
+test("a diagram grows with the pane up to a cap and shrinks to fit a narrow pane", () => {
 	const columnsAt = (width: number) => placement(renderMessage(FLOWCHART, {}, width).find(isImageLine)!).columns;
-	expect(columnsAt(16)).toBe(13);
+	expect(columnsAt(16)).toBeLessThanOrEqual(13);
 	expect(columnsAt(200)).toBeGreaterThan(columnsAt(16));
 	expect(columnsAt(400)).toBe(columnsAt(200));
 	const wide = "```mermaid\nflowchart LR\n" + Array.from({ length: 12 }, (_, i) => `  N${i}[Node number ${i}] --> N${i + 1}[Node number ${i + 1}]`).join("\n") + "\n```";
