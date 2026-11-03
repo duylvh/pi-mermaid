@@ -1,4 +1,7 @@
-import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { Resvg, type ResvgRenderOptions } from "@resvg/resvg-js";
@@ -22,13 +25,52 @@ export interface Raster {
 
 /** Pele's default font size, in SVG user units. */
 export const PELE_FONT_SIZE = 16;
-/** Advance width of a monospace glyph, in em. Menlo, DejaVu Sans Mono, and most terminal fonts use 0.6. */
-export const MONO_ADVANCE = 0.602;
 
-const MONO = "Menlo";
-const FONT_FILES = ["/System/Library/Fonts/Menlo.ttc", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"].filter((path) =>
+const FALLBACK_FAMILY = "Menlo";
+const FONT_DIRS = [join(homedir(), "Library/Fonts"), "/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental"];
+const UNICODE_FALLBACK = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
+
+/** The terminal's font family: PI_MERMAID_FONT, else Rex's configured terminal font, else Menlo. */
+function terminalFontFamily(): string {
+	if (process.env.PI_MERMAID_FONT) return process.env.PI_MERMAID_FONT;
+	if (process.env.TERM_PROGRAM?.toLowerCase() === "rex") {
+		try {
+			const name = execFileSync("defaults", ["read", "com.superlogical.rex", "Workspace.terminalFontName"], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+				timeout: 1000,
+			}).trim();
+			if (name) return name;
+		} catch {}
+	}
+	return FALLBACK_FAMILY;
+}
+
+const squash = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** Font files whose name starts with the family name, as font files conventionally are. */
+function fontFilesFor(family: string): string[] {
+	const prefix = squash(family);
+	return FONT_DIRS.flatMap((dir) => {
+		try {
+			return readdirSync(dir)
+				.filter((file) => /\.(ttf|otf|ttc)$/i.test(file) && squash(file).startsWith(prefix))
+				.map((file) => join(dir, file));
+		} catch {
+			return [];
+		}
+	});
+}
+
+const requestedFamily = terminalFontFamily();
+const requestedFiles = fontFilesFor(requestedFamily);
+const MONO = requestedFiles.length > 0 ? requestedFamily : FALLBACK_FAMILY;
+const FONT_FILES = [...(requestedFiles.length > 0 ? requestedFiles : fontFilesFor(FALLBACK_FAMILY)), UNICODE_FALLBACK].filter((path) =>
 	existsSync(path),
 );
+
+/** Advance width of a monospace glyph, in em: Menlo's is 1233/2048, most other coding fonts use 0.6. */
+export const MONO_ADVANCE = squash(MONO).startsWith("menlo") ? 1233 / 2048 : 0.6;
 
 const fontOptions: ResvgRenderOptions["font"] =
 	FONT_FILES.length > 0
@@ -38,9 +80,18 @@ const fontOptions: ResvgRenderOptions["font"] =
 /** Labels are set in a monospace font and measured in terminal cells, so N characters span N cells. */
 const cellMeasurer: TextMeasurer = { width: (text, size) => visibleWidth(text) * size * MONO_ADVANCE };
 
-const COMPACT = { nodeSpacing: 20, rankSpacing: 24 };
-/** Tighter than Pele's defaults to suit a terminal. A diagram's own frontmatter config still wins. */
-const COMPACT_CONFIG = { flowchart: COMPACT, state: COMPACT, class: COMPACT, er: COMPACT };
+const NODE_SPACING = 20;
+const RANK_SPACING = 24;
+const ACTOR_MARGIN = 40;
+
+/**
+ * Spacing tighter than Pele's defaults to suit a terminal, widened by `spread` to use a wide pane. Only
+ * the spacing across the diagram grows, so text stays its size. A diagram's frontmatter config still wins.
+ */
+function spacingConfig(spread: number) {
+	const graph = { nodeSpacing: NODE_SPACING * spread, rankSpacing: RANK_SPACING };
+	return { flowchart: graph, state: graph, class: graph, er: graph, sequence: { actorMargin: ACTOR_MARGIN * spread } };
+}
 const FONT_VARS = { "--pele-font": MONO, "--pele-font-mono": MONO };
 
 /** resvg ignores CSS custom properties, so substitute every `var()` with its concrete value. */
@@ -59,12 +110,12 @@ export function resolveCssVars(svg: string, palette: Palette): string {
 }
 
 /** Lay Mermaid source out with the theme's colors. Throws a PeleError on invalid or unsupported source. */
-export function layoutDiagram(source: string, palette: Palette): Layout {
+export function layoutDiagram(source: string, palette: Palette, spread = 1): Layout {
 	const { svg, width } = renderSvg(source, {
 		fontFamily: MONO,
 		fontFamilyMono: MONO,
 		measurer: cellMeasurer,
-		config: COMPACT_CONFIG,
+		config: spacingConfig(spread),
 	});
 	return { svg: resolveCssVars(svg, { ...palette, ...FONT_VARS }), width };
 }
@@ -145,18 +196,13 @@ function encodePng(rgba: Buffer, width: number, height: number): Buffer {
 	]);
 }
 
-/** Cut the raster into PNG strips of exactly `width` x `height` pixels, cropping or padding with transparency. */
-export function sliceStrips(raster: Raster, width: number, height: number): string[] {
+/** The raster as a PNG of exactly `width` x `height` pixels, cropped or padded with transparency. */
+export function encodeCanvas(raster: Raster, width: number, height: number): string {
 	const sourceStride = raster.widthPx * 4;
 	const stride = width * 4;
-	const copyBytes = Math.min(sourceStride, stride);
-	const strips: string[] = [];
-	for (let top = 0; top < raster.heightPx; top += height) {
-		const rgba = Buffer.alloc(height * stride);
-		for (let y = 0; y < height && top + y < raster.heightPx; y++) {
-			raster.pixels.copy(rgba, y * stride, (top + y) * sourceStride, (top + y) * sourceStride + copyBytes);
-		}
-		strips.push(encodePng(rgba, width, height).toString("base64"));
+	const rgba = Buffer.alloc(height * stride);
+	for (let y = 0; y < height && y < raster.heightPx; y++) {
+		raster.pixels.copy(rgba, y * stride, y * sourceStride, y * sourceStride + Math.min(sourceStride, stride));
 	}
-	return strips;
+	return encodePng(rgba, width, height).toString("base64");
 }

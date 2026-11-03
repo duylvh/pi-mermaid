@@ -6,20 +6,18 @@ Each closed ```` ```mermaid ```` fence in a user or assistant message becomes a 
 
 1. Pele lays the diagram out as SVG.
 2. The SVG's CSS variables are resolved to the active pi theme's colors.
-3. resvg rasterizes it to transparent pixels.
-4. The pixels are cut into strips two terminal rows tall, and pi-tui's `Image` component draws each strip with the Kitty graphics protocol.
+3. resvg rasterizes it at exactly the terminal's cell size, so the image is `columns x cellWidth` by `rows x cellHeight` pixels and the terminal draws it 1:1.
+4. The PNG is uploaded once as a Kitty virtual placement, and the diagram's rows are written as Kitty Unicode placeholder cells (U+10EEEE with row and column diacritics, the image id as their foreground color).
 
-Diagrams are rasterized at the cell size the terminal reports, so each strip is exactly `columns x cellWidth` by `2 x cellHeight` pixels and the terminal draws it 1:1. No resampling blurs the labels, and strips meet without seams. A narrower pane re-rasterizes at a smaller scale instead of shrinking the image.
+Because the rows are text, pi-tui handles a diagram like any other line: the scrollbar runs past it unbroken, scrolling clips it cell by cell, and redraws never re-place it. Some terminals, Rex among them, drop uploaded image data when a pane is resized, so every live diagram is uploaded again on resize.
 
-Labels are set in a monospace font and measured in terminal cells. A diagram grows with the pane up to 1.2x terminal-text size, and shrinks below that only when the pane is narrower. The size is chosen so every label glyph is a whole number of pixels wide, and labels are placed on whole pixels, so stems land on the pixel grid. Each glyph also gets a thin stroke in its own color, standing in for the stem darkening macOS applies to terminal text, so light text on a dark theme does not look thin and ragged. Spacing between nodes and ranks is tighter than Pele's defaults; a diagram's own frontmatter `config` still overrides it. Diagrams shrink to fit narrow panes.
+Labels are set in the terminal's own font: `PI_MERMAID_FONT` if set, otherwise Rex's configured terminal font, otherwise Menlo. They are measured in terminal cells and sized so every glyph is a whole number of pixels wide, at most 1.2x the terminal's own glyph, and are placed on whole pixels so stems land on the pixel grid. Each glyph also gets a thin stroke in its own color, standing in for the stem darkening macOS applies to terminal text.
 
-Some terminals, Rex among them, drop uploaded image data when a pane is resized, while pi-tui only re-places images it already uploaded. pi-mermaid re-registers every strip on resize, so pi-tui uploads them again and diagrams stay visible through width and height changes.
-
-Strips keep a diagram visible while it scrolls. A Kitty image only shows while its first row is on screen, and pi-tui re-places a partly scrolled image only for full-width scroll views, which layouts with a gutter (such as pi-geek-tui fullscreen) are not. With strips, at most one strip at the top edge is hidden.
+A wide pane spreads a diagram out instead of enlarging its text: node spacing (and actor spacing in sequence diagrams) grows up to 3x while the diagram still fits. Diagrams shrink to fit narrow panes. A diagram's own frontmatter `config` overrides these spacings.
 
 ## Requirements
 
-- A terminal with Kitty graphics that pi detects, such as Rex, Ghostty, Kitty, WezTerm, or Herdr. Under tmux, or in any terminal without image support, the Mermaid source is shown unchanged.
+- A terminal with Kitty graphics and Unicode placeholders that pi detects, such as Rex, Ghostty, or Kitty. Under tmux, or in any terminal without image support, the Mermaid source is shown unchanged.
 - pi's built-in renderer turned off. It runs before extension transformers and would consume the blocks first:
 
   ```json

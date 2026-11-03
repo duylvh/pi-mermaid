@@ -1,25 +1,28 @@
 import type { ExtensionAPI, MarkdownTransformContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Color, colorToHex, colorToOklch, getCapabilities, getCellDimensions, Image, Marked } from "@earendil-works/pi-tui";
-import { type Layout, layoutDiagram, MONO_ADVANCE, PELE_FONT_SIZE, type Palette, rasterize, sliceStrips } from "./render.ts";
+import { type Color, colorToHex, colorToOklch, getCapabilities, getCellDimensions, Marked } from "@earendil-works/pi-tui";
+import { DIACRITICS } from "./diacritics.ts";
+import { encodeCanvas, type Layout, layoutDiagram, MONO_ADVANCE, PELE_FONT_SIZE, type Palette, rasterize } from "./render.ts";
 
 /** SVG units per terminal column: one monospace glyph at Pele's font size. */
 const UNITS_PER_CELL = MONO_ADVANCE * PELE_FONT_SIZE;
-/** Rows per strip: an image row plus the blank row Markdown puts after every paragraph. */
-const STRIP_ROWS = 2;
 const CACHE_LIMIT = 16;
 
 type Laid = { ok: true; layout: Layout } | { ok: false; error: string };
 
 const lexer = new Marked();
 const layouts = new Map<string, Laid>();
-/** A diagram's strips at one column count; `render(renderWidth)` yields each strip's Kitty sequence. */
-interface StripSet {
-	images: Image[];
-	renderWidth: number;
-}
-const stripSets = new Map<string, StripSet>();
 
-function remember<V>(cache: Map<string, V>, key: string, make: () => V): V {
+/** One diagram at one size: a PNG of exactly `columns` x `rows` cells, shown through Unicode placeholders. */
+interface Diagram {
+	/** Kitty image id, carried by the placeholder cells as their 24-bit foreground color. */
+	id: number;
+	png: string;
+	columns: number;
+	rows: number;
+}
+const diagrams = new Map<string, Diagram>();
+
+function remember<V>(cache: Map<string, V>, key: string, make: () => V, evict?: (value: V) => void): V {
 	const hit = cache.get(key);
 	if (hit !== undefined) {
 		cache.delete(key);
@@ -28,7 +31,11 @@ function remember<V>(cache: Map<string, V>, key: string, make: () => V): V {
 	}
 	const value = make();
 	cache.set(key, value);
-	if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+	if (cache.size > CACHE_LIMIT) {
+		const oldest = cache.keys().next().value!;
+		evict?.(cache.get(oldest)!);
+		cache.delete(oldest);
+	}
 	return value;
 }
 
@@ -112,6 +119,9 @@ const escapeMarkdown = (text: string) => text.replace(/[!-/:-@[-`{-~]/g, "\\$&")
 /** Largest glyph size over the terminal's own: a diagram grows with the pane up to this, then stops. */
 const MAX_ZOOM = 1.2;
 
+/** Spacing multipliers tried, widest last, to let a diagram use a wide pane without larger text. */
+const SPREADS = [1, 1.5, 2, 3];
+
 /** Below this many pixels per glyph, rounding the advance down would shrink a diagram too much. */
 const MIN_WHOLE_ADVANCE_PX = 4;
 
@@ -135,55 +145,86 @@ function fit(layout: Layout, availableWidth: number, cellWidthPx: number): Fit {
 	return { scale, columns: Math.max(1, Math.ceil((layout.width * scale) / cellWidthPx)) };
 }
 
-/**
- * A diagram is drawn as a stack of short image strips rather than one tall image. A Kitty image only
- * shows while its first row is on screen, and pi-tui re-places a partly scrolled image only for
- * full-width scroll views, which layouts with a gutter (pi-geek-tui) are not. Each strip is its own
- * paragraph, so the blank row after it is the strip's second row.
- *
- * A strip sits in a code span because themes style a code span as one unit, while text styling such as
- * number highlighting would split the escape sequence. Each strip row starts with U+2800 and a
- * U+2800 row follows the last strip: it draws nothing but is not whitespace, so renderers that trim
- * blank rows at a message's edges after stripping escape sequences (pi-geek-tui does) keep them.
- */
-function diagramMarkdown({ images, renderWidth }: StripSet): string {
-	const rows = images.map((strip) => codeSpan(`\u2800${strip.render(renderWidth)[0] ?? ""}`));
-	return `${rows.join("\n\n")}\n\n\u2800\n\n`;
+const KITTY_CHUNK = 4096;
+const PLACEHOLDER = String.fromCodePoint(0x10eeee);
+
+/** Upload the PNG and create a virtual placement of `columns` x `rows` cells for its placeholders. */
+function uploadSequence({ id, png, columns, rows }: Diagram): string {
+	let sequence = "";
+	for (let offset = 0; offset < png.length; offset += KITTY_CHUNK) {
+		const more = offset + KITTY_CHUNK < png.length ? 1 : 0;
+		const controls = offset === 0 ? `a=T,U=1,f=100,q=2,i=${id},c=${columns},r=${rows},m=${more}` : `m=${more}`;
+		sequence += `\x1b_G${controls};${png.slice(offset, offset + KITTY_CHUNK)}\x1b\\`;
+	}
+	return sequence;
 }
 
+const deleteSequence = (id: number) => `\x1b_Ga=d,d=I,i=${id},q=2\x1b\\`;
+
 /**
- * Strips are rasterized at exactly the terminal's cell size, so the terminal shows every pixel 1:1:
- * no resampling softens the text and no strip is scaled differently from its neighbours. A narrower
- * pane re-rasterizes at a smaller scale rather than shrinking the image.
+ * Each diagram row is ordinary text: Kitty Unicode placeholder cells whose diacritics name the row and
+ * column and whose foreground color names the image, so the terminal paints the image into exactly
+ * those cells. pi-tui then treats diagrams as text, so its scrollbar, scrolling, clipping and resize
+ * handling all apply as they do to prose. Rows sit in code spans because themes style a code span as one
+ * unit, while text styling such as number highlighting would split the color sequence.
  */
-function createStrips(layout: Layout, { scale, columns }: Fit, fallbackColor: (text: string) => string): StripSet {
+function diagramMarkdown({ id, columns, rows }: Diagram): string {
+	const color = `\x1b[38;2;${(id >> 16) & 255};${(id >> 8) & 255};${id & 255}m`;
+	const lines = Array.from({ length: rows }, (_, row) => {
+		let cells = "";
+		for (let column = 0; column < columns; column++) cells += PLACEHOLDER + String.fromCodePoint(DIACRITICS[row]!, DIACRITICS[column]!);
+		return codeSpan(`${color}${cells}\x1b[39m`);
+	});
+	return `${lines.join("  \n")}\n\n`;
+}
+
+const MAX_PLACEHOLDER_CELLS = DIACRITICS.length;
+
+/** Kitty graphics terminals known to draw Unicode placeholders; elsewhere the Mermaid source is shown. */
+function drawsPlaceholders(): boolean {
+	if (getCapabilities().images !== "kitty" || process.env.TMUX) return false;
+	const program = process.env.TERM_PROGRAM?.toLowerCase() ?? "";
+	return program === "rex" || program === "ghostty" || program === "kitty" || Boolean(process.env.KITTY_WINDOW_ID) || Boolean(process.env.GHOSTTY_RESOURCES_DIR);
+}
+
+/** Rasterized at exactly the terminal's cell size, so the terminal shows every pixel 1:1. */
+function createDiagram(layout: Layout, { scale, columns }: Fit): Diagram {
 	const cell = getCellDimensions();
-	const width = columns * cell.widthPx;
 	const raster = rasterize(layout, scale);
-	const images = sliceStrips(raster, width, STRIP_ROWS * cell.heightPx).map(
-		(base64) => new Image(base64, "image/png", { fallbackColor }, { maxWidthCells: columns, maxHeightCells: STRIP_ROWS }),
-	);
-	return { images, renderWidth: columns + 2 };
+	const rows = Math.min(MAX_PLACEHOLDER_CELLS, Math.max(1, Math.ceil(raster.heightPx / cell.heightPx)));
+	return {
+		id: 1 + Math.floor(Math.random() * 0xfffffe),
+		png: encodeCanvas(raster, columns * cell.widthPx, rows * cell.heightPx),
+		columns,
+		rows,
+	};
 }
 
 export default function piMermaid(pi: ExtensionAPI) {
 	let ui: { readonly theme: Theme } | undefined;
 	let warnedAboutCore = false;
 
-	// Rex drops uploaded Kitty image data when a pane is resized, while pi-tui only re-places images it
-	// already uploaded. Re-rendering a strip registers a new transmission for its image id, so the next
-	// frame uploads it again even when the rendered line is unchanged, as after a height-only resize.
-	const reuploadStrips = () => {
-		for (const { images, renderWidth } of stripSets.values()) {
-			for (const strip of images) {
-				strip.invalidate();
-				strip.render(renderWidth);
-			}
-		}
+	// Image data lives in the terminal, outside pi-tui's frames, so it is written directly. Rex drops
+	// uploaded image data when a pane is resized, so every live diagram is uploaded again then.
+	const uploaded = new Set<number>();
+	const upload = (diagram: Diagram) => {
+		if (uploaded.has(diagram.id)) return;
+		uploaded.add(diagram.id);
+		process.stdout.write(uploadSequence(diagram));
 	};
-	process.stdout.on("resize", reuploadStrips);
+	const reupload = () => {
+		uploaded.clear();
+		for (const diagram of diagrams.values()) upload(diagram);
+	};
+	const forget = (diagram: Diagram) => {
+		uploaded.delete(diagram.id);
+		process.stdout.write(deleteSequence(diagram.id));
+	};
+	process.stdout.on("resize", reupload);
 	pi.on("session_shutdown", () => {
-		process.stdout.off("resize", reuploadStrips);
+		process.stdout.off("resize", reupload);
+		for (const diagram of diagrams.values()) forget(diagram);
+		diagrams.clear();
 	});
 
 	pi.on("session_start", (_event, ctx) => {
@@ -200,35 +241,47 @@ export default function piMermaid(pi: ExtensionAPI) {
 
 	pi.registerMarkdownTransformer((markdown: string, context: MarkdownTransformContext) => {
 		const theme = ui?.theme;
-		if (!theme || context.messageType === "assistant-thinking" || !getCapabilities().images) return markdown;
+		if (!theme || context.messageType === "assistant-thinking" || !drawsPlaceholders()) return markdown;
 		if (!/^[ \t]*(`{3,}|~{3,})[ \t]*mermaid/im.test(markdown)) return markdown;
 
 		const palette = paletteFrom(theme);
 		const paletteKey = Object.values(palette).join();
-		let ordinal = 0;
 
 		return lexer
 			.lexer(markdown)
 			.map((token) => {
 				if (!isMermaid(token) || !isClosedFence(token.raw)) return token.raw;
 				const source = (token as { text: string }).text;
-				const key = `${paletteKey}|${source}`;
-				const laid = remember(layouts, key, (): Laid => {
-					try {
-						return { ok: true, layout: layoutDiagram(source, palette) };
-					} catch (error) {
-						return { ok: false, error: error instanceof Error ? error.message : String(error) };
-					}
-				});
+				const layoutAt = (spread: number) =>
+					remember(layouts, `${paletteKey}|${spread}|${source}`, (): Laid => {
+						try {
+							return { ok: true, layout: layoutDiagram(source, palette, spread) };
+						} catch (error) {
+							return { ok: false, error: error instanceof Error ? error.message : String(error) };
+						}
+					});
+				const laid = layoutAt(1);
 				if (!laid.ok) {
 					if (context.isStreaming) return token.raw;
 					return `${token.raw}\n\n${theme.fg("warning", escapeMarkdown(`Mermaid diagram not rendered: ${laid.error}`))}\n\n`;
 				}
-				const { layout } = laid;
 				const cell = getCellDimensions();
-				const size = fit(layout, context.availableWidth, cell.widthPx);
-				const stripsKey = `${context.messageId ?? "live"}|${ordinal++}|${size.scale}|${cell.widthPx}x${cell.heightPx}|${key}`;
-				return diagramMarkdown(remember(stripSets, stripsKey, () => createStrips(layout, size, (s) => theme.fg("muted", s))));
+				const { scale } = fit(laid.layout, context.availableWidth, cell.widthPx);
+				const columnsOf = (layout: Layout) => Math.max(1, Math.ceil((layout.width * scale) / cell.widthPx));
+				let layout = laid.layout;
+				let spread = 1;
+				for (const wider of SPREADS.slice(1)) {
+					const candidate = layoutAt(wider);
+					if (!candidate.ok || columnsOf(candidate.layout) > context.availableWidth - 1) break;
+					layout = candidate.layout;
+					spread = wider;
+				}
+				const size = { scale, columns: columnsOf(layout) };
+				const key = `${paletteKey}|${spread}|${source}`;
+				const diagramKey = `${size.scale}|${cell.widthPx}x${cell.heightPx}|${key}`;
+				const diagram = remember(diagrams, diagramKey, () => createDiagram(layout, size), forget);
+				upload(diagram);
+				return diagramMarkdown(diagram);
 			})
 			.join("");
 	});

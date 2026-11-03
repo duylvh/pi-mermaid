@@ -1,22 +1,25 @@
-import { beforeAll, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, test } from "bun:test";
 import { getMarkdownTheme, initTheme, type MarkdownTransformContext, type MarkdownTransformer, Theme } from "@earendil-works/pi-coding-agent";
 import { getCellDimensions, Markdown, setCapabilities, setCellDimensions, visibleWidth } from "@earendil-works/pi-tui";
 
 import piMermaid from "./index.ts";
 
-const isImageLine = (line: string) => line.includes("\x1b_G");
 const THEME_MODULE = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js", import.meta.url).href;
-
-const FLOWCHART = "```mermaid\nflowchart TD\n  A[Start] --> B{Ok?}\n  B -->|yes| C[Done]\n```";
+const flowchart = (end = "Done") => `\`\`\`mermaid\nflowchart TD\n  A[Start] --> B{Ok?}\n  B -->|yes| C[${end}]\n\`\`\``;
+const FLOWCHART = flowchart();
+const PLACEHOLDER_CELL = /\u{10eeee}[\u0300-\u{1d244}]{2}/gu;
 
 let transform: MarkdownTransformer;
 let getThemeByName: (name: string) => Theme | undefined;
 const ui = { theme: undefined as unknown as Theme, notify() {} };
+let terminal: string[] = [];
 
 beforeAll(async () => {
+	process.env.TERM_PROGRAM = "rex";
 	initTheme("dark");
 	({ getThemeByName } = await import(THEME_MODULE));
 	ui.theme = getThemeByName("dark")!;
+	(process.stdout as { write: unknown }).write = (data: string) => terminal.push(String(data)) > 0;
 	const handlers: Record<string, (event: unknown, ctx: unknown) => void> = {};
 	piMermaid({
 		on: (name: string, handler: (event: unknown, ctx: unknown) => void) => (handlers[name] = handler),
@@ -27,6 +30,10 @@ beforeAll(async () => {
 	setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 });
 
+afterEach(() => {
+	terminal = [];
+});
+
 function renderMessage(text: string, overrides: Partial<MarkdownTransformContext> = {}, width = 100): string[] {
 	const markdown = new Markdown(text, 1, 0, getMarkdownTheme(), undefined, {
 		transform: (md, availableWidth) =>
@@ -35,55 +42,106 @@ function renderMessage(text: string, overrides: Partial<MarkdownTransformContext
 	return markdown.render(width);
 }
 
-const placement = (line: string) => {
-	const [, columns, rows] = /\bc=(\d+),r=(\d+)/.exec(line) ?? [];
-	return { columns: Number(columns), rows: Number(rows) };
-};
-const visible = (line: string) => line.replace(/\x1b\[[0-9;]*m|\u2800/g, "").trim();
+const diagramRows = (lines: string[]) => lines.filter((line) => line.includes("\u{10eeee}"));
+const cellsIn = (line: string) => line.match(PLACEHOLDER_CELL)?.length ?? 0;
 
-test("a diagram renders as a stack of 2-row image strips, each anchored on its own row, keeping surrounding text", () => {
+interface Upload {
+	id: number;
+	columns: number;
+	rows: number;
+	width: number;
+	height: number;
+}
+
+/** Kitty uploads written to the terminal, joined across chunks. */
+function uploads(): Upload[] {
+	const found: Upload[] = [];
+	for (const [, controls, first, rest] of terminal.join("").matchAll(/\x1b_G(a=T[^;]*);([^\x1b]*)\x1b\\((?:\x1b_Gm=[01];[^\x1b]*\x1b\\)*)/g)) {
+		const png = Buffer.from(first! + [...rest!.matchAll(/;([^\x1b]*)\x1b/g)].map((m) => m[1]).join(""), "base64");
+		const value = (key: string) => Number(new RegExp(`\\b${key}=(\\d+)`).exec(controls!)?.[1]);
+		expect(controls).toContain("U=1");
+		found.push({ id: value("i"), columns: value("c"), rows: value("r"), width: png.readUInt32BE(16), height: png.readUInt32BE(20) });
+	}
+	return found;
+}
+
+test("a diagram renders as plain text rows of placeholder cells, keeping surrounding text", () => {
 	const lines = renderMessage(`Before\n\n${FLOWCHART}\n\nAfter`);
-	const anchors = lines.flatMap((line, row) => (isImageLine(line) ? [row] : []));
-	expect(anchors.length).toBeGreaterThan(2);
-	expect(anchors.every((row) => placement(lines[row]!).rows === 2 && visible(lines[row + 1]!) === "")).toBe(true);
-	expect(anchors.slice(1).every((row, i) => row - anchors[i]! === 2)).toBe(true);
-	expect(new Set(anchors.map((row) => placement(lines[row]!).columns)).size).toBe(1);
-	expect(lines.every((line) => !line.includes("\n"))).toBe(true);
+	const rows = diagramRows(lines);
+	const [upload] = uploads();
+	expect(rows).toHaveLength(upload!.rows);
+	expect(rows.every((row) => cellsIn(row) === upload!.columns)).toBe(true);
+	expect(lines.every((line) => !line.includes("\x1b_G") && !line.includes("\n"))).toBe(true);
 	const text = lines.join("\n");
 	expect(text).toContain("Before");
 	expect(text).toContain("After");
 	expect(text).not.toContain("flowchart TD");
 });
 
+test("each image is uploaded once, and again after a resize", () => {
+	const source = flowchart("Uploaded once");
+	renderMessage(source);
+	renderMessage(source);
+	expect(uploads()).toHaveLength(1);
+	const [{ id }] = uploads() as [Upload];
+	process.stdout.emit("resize");
+	expect(uploads().filter((upload) => upload.id === id)).toHaveLength(2);
+});
+
+test("images are drawn pixel for pixel at any terminal cell size", () => {
+	const original = getCellDimensions();
+	try {
+		for (const [widthPx, heightPx] of [[7, 15], [8, 16], [9, 18], [10, 22], [16, 34]] as const) {
+			setCellDimensions({ widthPx, heightPx });
+			terminal = [];
+			renderMessage(flowchart(`Cell ${widthPx}x${heightPx}`));
+			const [upload] = uploads();
+			expect(`${upload!.width}x${upload!.height}`).toBe(`${upload!.columns * widthPx}x${upload!.rows * heightPx}`);
+		}
+	} finally {
+		setCellDimensions(original);
+	}
+});
+
 test("a diagram grows with the pane up to a cap and shrinks to fit a narrow pane", () => {
-	const columnsAt = (width: number) => placement(renderMessage(FLOWCHART, {}, width).find(isImageLine)!).columns;
-	expect(columnsAt(16)).toBeLessThanOrEqual(13);
-	expect(columnsAt(200)).toBeGreaterThan(columnsAt(16));
+	const columnsAt = (width: number) => cellsIn(diagramRows(renderMessage(FLOWCHART, {}, width))[0]!);
+	expect(columnsAt(12)).toBeLessThanOrEqual(9);
+	expect(columnsAt(200)).toBeGreaterThan(columnsAt(12));
 	expect(columnsAt(400)).toBe(columnsAt(200));
 	const wide = "```mermaid\nflowchart LR\n" + Array.from({ length: 12 }, (_, i) => `  N${i}[Node number ${i}] --> N${i + 1}[Node number ${i + 1}]`).join("\n") + "\n```";
-	const strips = renderMessage(wide, {}, 40).filter(isImageLine);
-	expect(strips.every((line) => placement(line).columns <= 37)).toBe(true);
+	expect(renderMessage(wide, {}, 40).every((line) => visibleWidth(line) <= 40)).toBe(true);
 });
 
 test("an unclosed block while streaming stays as source", () => {
 	const lines = renderMessage("```mermaid\nflowchart TD\n  A --> B", { isStreaming: true });
-	expect(lines.some(isImageLine)).toBe(false);
+	expect(diagramRows(lines)).toHaveLength(0);
 	expect(lines.join("\n")).toContain("A --> B");
 });
 
 test("invalid mermaid keeps the source and explains why", () => {
 	const lines = renderMessage("```mermaid\nnotadiagram\n  ???\n```");
-	expect(lines.some(isImageLine)).toBe(false);
+	expect(diagramRows(lines)).toHaveLength(0);
 	expect(lines.join("\n")).toContain("Mermaid diagram not rendered");
 	expect(lines.join("\n")).toContain("notadiagram");
+});
+
+test("terminals that cannot draw placeholders see the source untouched", () => {
+	process.env.TERM_PROGRAM = "WezTerm";
+	try {
+		const lines = renderMessage(FLOWCHART);
+		expect(diagramRows(lines)).toHaveLength(0);
+		expect(lines.join("\n")).toContain("A[Start]");
+	} finally {
+		process.env.TERM_PROGRAM = "rex";
+	}
 });
 
 test("terminals without image support see the source untouched", () => {
 	setCapabilities({ images: null, trueColor: true, hyperlinks: true });
 	try {
 		const lines = renderMessage(FLOWCHART);
-		expect(lines.some(isImageLine)).toBe(false);
-		expect(lines.map((l) => visibleWidth(l)).every((w) => w <= 100)).toBe(true);
+		expect(diagramRows(lines)).toHaveLength(0);
+		expect(uploads()).toHaveLength(0);
 		expect(lines.join("\n")).toContain("A[Start]");
 	} finally {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
@@ -91,44 +149,42 @@ test("terminals without image support see the source untouched", () => {
 });
 
 test("the diagram follows the live theme, including one swapped in after session start", () => {
-	const payload = () => renderMessage(FLOWCHART).filter(isImageLine).join().replace(/\bi=\d+/g, "");
-	const dark = payload();
+	const image = () => {
+		terminal = [];
+		renderMessage(FLOWCHART);
+		return terminal.join("").replace(/\bi=\d+/g, "");
+	};
+	const dark = image();
 	ui.theme = getThemeByName("light")!;
 	try {
-		expect(payload()).not.toBe(dark);
+		expect(image()).not.toBe(dark);
 	} finally {
 		ui.theme = getThemeByName("dark")!;
 	}
-	expect(payload()).toBe(dark);
+	renderMessage(FLOWCHART);
+	process.stdout.emit("resize");
+	expect(terminal.join("")).toContain(dark.slice(40, 400));
 });
 
 test("a diagram survives renderers that trim blank rows at a message's edges", () => {
-	const blank = (line: string) => line.replace(/\x1b_G[^\x1b]*\x1b\\|\x1b\[[0-9;]*m/g, "").trim() === "";
+	const blank = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "").trim() === "";
 	const lines = renderMessage(FLOWCHART);
-	const strips = lines.filter(isImageLine).length;
+	const rows = diagramRows(lines).length;
 	while (lines.length && blank(lines[0]!)) lines.shift();
 	while (lines.length && blank(lines.at(-1)!)) lines.pop();
-	expect(lines.filter(isImageLine)).toHaveLength(strips);
-	const lastStrip = lines.findLastIndex(isImageLine);
-	expect(lines.length - lastStrip).toBeGreaterThanOrEqual(placement(lines[lastStrip]!).rows);
+	expect(diagramRows(lines)).toHaveLength(rows);
 });
 
-const pngSize = (line: string) => {
-	const png = Buffer.from([...line.matchAll(/\x1b_G[^;]*;([^\x1b]*)\x1b\\/g)].map((m) => m[1]).join(""), "base64");
-	return `${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`;
-};
-
-test("strips are drawn pixel for pixel at any terminal cell size", () => {
-	const original = getCellDimensions();
-	try {
-		for (const [widthPx, heightPx] of [[7, 15], [8, 16], [9, 18], [10, 22], [16, 34]] as const) {
-			setCellDimensions({ widthPx, heightPx });
-			const strips = renderMessage(FLOWCHART).filter(isImageLine);
-			const { columns } = placement(strips[0]!);
-			expect(strips.every((line) => placement(line).columns === columns && placement(line).rows === 2)).toBe(true);
-			expect(new Set(strips.map(pngSize))).toEqual(new Set([`${columns * widthPx}x${2 * heightPx}`]));
-		}
-	} finally {
-		setCellDimensions(original);
-	}
+test("a wide pane spreads a diagram out instead of enlarging its text", () => {
+	const sequence = "```mermaid\nsequenceDiagram\n  Client->>Server: request\n  Server->>Store: read\n  Store-->>Server: rows\n  Server-->>Client: response\n```";
+	const at = (width: number) => {
+		terminal = [];
+		const rows = diagramRows(renderMessage(sequence, {}, width));
+		return { columns: cellsIn(rows[0]!), rows: rows.length, fits: renderMessage(sequence, {}, width).every((line) => visibleWidth(line) <= width) };
+	};
+	const narrow = at(60);
+	const wide = at(200);
+	expect(wide.columns).toBeGreaterThan(narrow.columns);
+	expect(wide.rows).toBe(narrow.rows);
+	expect(narrow.fits && wide.fits).toBe(true);
 });
