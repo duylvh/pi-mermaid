@@ -105,13 +105,20 @@ test("a diagram that ends a message keeps its height when trailing blank rows ar
 	expect(lines.length - lastStrip).toBeGreaterThanOrEqual(placement(lines[lastStrip]!).rows);
 });
 
-test("strips line up as one image at any terminal cell size", () => {
+const pngSize = (line: string) => {
+	const png = Buffer.from([...line.matchAll(/\x1b_G[^;]*;([^\x1b]*)\x1b\\/g)].map((m) => m[1]).join(""), "base64");
+	return `${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`;
+};
+
+test("strips are drawn pixel for pixel at any terminal cell size", () => {
 	const original = getCellDimensions();
 	try {
 		for (const [widthPx, heightPx] of [[7, 15], [8, 16], [9, 18], [10, 22], [16, 34]] as const) {
 			setCellDimensions({ widthPx, heightPx });
-			const strips = renderMessage(FLOWCHART).filter(isImageLine).map(placement);
-			expect(new Set(strips.map((s) => `${s.columns}x${s.rows}`))).toEqual(new Set([`${strips[0]!.columns}x2`]));
+			const strips = renderMessage(FLOWCHART).filter(isImageLine);
+			const { columns } = placement(strips[0]!);
+			expect(strips.every((line) => placement(line).columns === columns && placement(line).rows === 2)).toBe(true);
+			expect(new Set(strips.map(pngSize))).toEqual(new Set([`${columns * widthPx}x${2 * heightPx}`]));
 		}
 	} finally {
 		setCellDimensions(original);

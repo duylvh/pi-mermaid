@@ -1,6 +1,6 @@
 import type { ExtensionAPI, MarkdownTransformContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Color, colorToHex, colorToOklch, getCapabilities, getCellDimensions, Image, Marked } from "@earendil-works/pi-tui";
-import { MONO_ADVANCE, PELE_FONT_SIZE, type Palette, type Raster, renderDiagram, sliceStrips } from "./render.ts";
+import { type Layout, layoutDiagram, MONO_ADVANCE, PELE_FONT_SIZE, type Palette, rasterize, sliceStrips } from "./render.ts";
 
 /** SVG units per terminal column: one monospace glyph at Pele's font size. */
 const UNITS_PER_CELL = MONO_ADVANCE * PELE_FONT_SIZE;
@@ -8,10 +8,10 @@ const UNITS_PER_CELL = MONO_ADVANCE * PELE_FONT_SIZE;
 const STRIP_ROWS = 2;
 const CACHE_LIMIT = 16;
 
-type Rendered = { ok: true; raster: Raster } | { ok: false; error: string };
+type Laid = { ok: true; layout: Layout } | { ok: false; error: string };
 
 const lexer = new Marked();
-const diagrams = new Map<string, Rendered>();
+const layouts = new Map<string, Laid>();
 const stripImages = new Map<string, Image[]>();
 
 function remember<V>(cache: Map<string, V>, key: string, make: () => V): V {
@@ -105,10 +105,7 @@ function codeSpan(content: string): string {
 const escapeMarkdown = (text: string) => text.replace(/[!-/:-@[-`{-~]/g, "\\$&");
 
 /** Columns at which diagram text is exactly terminal text: one character per cell. */
-const naturalColumns = (raster: Raster) => Math.max(1, Math.ceil(raster.layoutWidth / UNITS_PER_CELL));
-
-/** Twice the on-screen pixel density, so lines stay sharp on HiDPI displays. */
-const rasterScale = () => Math.min(4, Math.max(2, (2 * getCellDimensions().widthPx) / UNITS_PER_CELL));
+const naturalColumns = (layout: Layout) => Math.max(1, Math.ceil(layout.width / UNITS_PER_CELL));
 
 /**
  * A diagram is drawn as a stack of short image strips rather than one tall image. A Kitty image only
@@ -125,10 +122,16 @@ function diagramMarkdown(strips: Image[], columns: number): string {
 	return `${rows.join("\n\n")}\n\n\u2800\n\n`;
 }
 
-function createStrips(raster: Raster, columns: number, fallbackColor: (text: string) => string): Image[] {
+/**
+ * Strips are rasterized at exactly the terminal's cell size, so the terminal shows every pixel 1:1:
+ * no resampling softens the text and no strip is scaled differently from its neighbours. A narrower
+ * pane re-rasterizes at a smaller scale rather than shrinking the image.
+ */
+function createStrips(layout: Layout, columns: number, fallbackColor: (text: string) => string): Image[] {
 	const cell = getCellDimensions();
-	const stripHeightPx = Math.max(1, Math.floor((STRIP_ROWS * cell.heightPx * raster.widthPx) / (columns * cell.widthPx)));
-	return sliceStrips(raster, stripHeightPx).map(
+	const width = columns * cell.widthPx;
+	const raster = rasterize(layout, width / layout.width);
+	return sliceStrips(raster, width, STRIP_ROWS * cell.heightPx).map(
 		(base64) => new Image(base64, "image/png", { fallbackColor }, { maxWidthCells: columns, maxHeightCells: STRIP_ROWS }),
 	);
 }
@@ -156,7 +159,6 @@ export default function piMermaid(pi: ExtensionAPI) {
 
 		const palette = paletteFrom(theme);
 		const paletteKey = Object.values(palette).join();
-		const scale = rasterScale();
 		let ordinal = 0;
 
 		return lexer
@@ -164,23 +166,23 @@ export default function piMermaid(pi: ExtensionAPI) {
 			.map((token) => {
 				if (!isMermaid(token) || !isClosedFence(token.raw)) return token.raw;
 				const source = (token as { text: string }).text;
-				const key = `${paletteKey}|${scale}|${source}`;
-				const rendered = remember(diagrams, key, (): Rendered => {
+				const key = `${paletteKey}|${source}`;
+				const laid = remember(layouts, key, (): Laid => {
 					try {
-						return { ok: true, raster: renderDiagram(source, palette, scale) };
+						return { ok: true, layout: layoutDiagram(source, palette) };
 					} catch (error) {
 						return { ok: false, error: error instanceof Error ? error.message : String(error) };
 					}
 				});
-				if (!rendered.ok) {
+				if (!laid.ok) {
 					if (context.isStreaming) return token.raw;
-					return `${token.raw}\n\n${theme.fg("warning", escapeMarkdown(`Mermaid diagram not rendered: ${rendered.error}`))}\n\n`;
+					return `${token.raw}\n\n${theme.fg("warning", escapeMarkdown(`Mermaid diagram not rendered: ${laid.error}`))}\n\n`;
 				}
-				const { raster } = rendered;
-				const columns = Math.max(1, Math.min(naturalColumns(raster), context.availableWidth - 1));
+				const { layout } = laid;
+				const columns = Math.max(1, Math.min(naturalColumns(layout), context.availableWidth - 1));
 				const cell = getCellDimensions();
 				const stripsKey = `${context.messageId ?? "live"}|${ordinal++}|${columns}|${cell.widthPx}x${cell.heightPx}|${key}`;
-				const strips = remember(stripImages, stripsKey, () => createStrips(raster, columns, (s) => theme.fg("muted", s)));
+				const strips = remember(stripImages, stripsKey, () => createStrips(layout, columns, (s) => theme.fg("muted", s)));
 				return diagramMarkdown(strips, columns);
 			})
 			.join("");

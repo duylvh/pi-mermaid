@@ -6,13 +6,18 @@ import { render as renderSvg, type TextMeasurer } from "pele";
 
 export type Palette = Readonly<Record<`--pele-${string}`, string>>;
 
+/** A Pele layout with every CSS variable resolved, ready to rasterize at any scale. */
+export interface Layout {
+	svg: string;
+	/** Width in SVG user units. */
+	width: number;
+}
+
 export interface Raster {
 	/** RGBA, row-major. */
 	pixels: Buffer;
 	widthPx: number;
 	heightPx: number;
-	/** Pele layout width, in SVG user units, before rasterization. */
-	layoutWidth: number;
 }
 
 /** Pele's default font size, in SVG user units. */
@@ -53,16 +58,20 @@ export function resolveCssVars(svg: string, palette: Palette): string {
 	return substitute(svg);
 }
 
-/** Render Mermaid source to transparent RGBA pixels. Throws a PeleError on invalid or unsupported source. */
-export function renderDiagram(source: string, palette: Palette, scale: number): Raster {
+/** Lay Mermaid source out with the theme's colors. Throws a PeleError on invalid or unsupported source. */
+export function layoutDiagram(source: string, palette: Palette): Layout {
 	const { svg, width } = renderSvg(source, {
 		fontFamily: MONO,
 		fontFamilyMono: MONO,
 		measurer: cellMeasurer,
 		config: COMPACT_CONFIG,
 	});
-	const png = new Resvg(resolveCssVars(svg, { ...palette, ...FONT_VARS }), { fitTo: { mode: "zoom", value: scale }, font: fontOptions }).render();
-	return { pixels: Buffer.from(png.pixels), widthPx: png.width, heightPx: png.height, layoutWidth: width };
+	return { svg: resolveCssVars(svg, { ...palette, ...FONT_VARS }), width };
+}
+
+export function rasterize(layout: Layout, scale: number): Raster {
+	const image = new Resvg(layout.svg, { fitTo: { mode: "zoom", value: scale }, font: fontOptions }).render();
+	return { pixels: Buffer.from(image.pixels), widthPx: image.width, heightPx: image.height };
 }
 
 function pngChunk(type: string, data: Buffer): Buffer {
@@ -81,8 +90,7 @@ function encodePng(rgba: Buffer, width: number, height: number): Buffer {
 	header.set([8, 6, 0, 0, 0], 8);
 	const stride = width * 4;
 	const scanlines = Buffer.alloc(height * (stride + 1));
-	const sourceRows = Math.min(height, rgba.length / stride);
-	for (let y = 0; y < sourceRows; y++) rgba.copy(scanlines, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
+	for (let y = 0; y < height; y++) rgba.copy(scanlines, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
 	return Buffer.concat([
 		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
 		pngChunk("IHDR", header),
@@ -91,13 +99,18 @@ function encodePng(rgba: Buffer, width: number, height: number): Buffer {
 	]);
 }
 
-/** Cut the raster into PNG strips of `stripHeightPx` rows, padding the last strip with transparency. */
-export function sliceStrips(raster: Raster, stripHeightPx: number): string[] {
-	const stride = raster.widthPx * 4;
+/** Cut the raster into PNG strips of exactly `width` x `height` pixels, cropping or padding with transparency. */
+export function sliceStrips(raster: Raster, width: number, height: number): string[] {
+	const sourceStride = raster.widthPx * 4;
+	const stride = width * 4;
+	const copyBytes = Math.min(sourceStride, stride);
 	const strips: string[] = [];
-	for (let top = 0; top < raster.heightPx; top += stripHeightPx) {
-		const rgba = raster.pixels.subarray(top * stride, Math.min(raster.heightPx, top + stripHeightPx) * stride);
-		strips.push(encodePng(rgba, raster.widthPx, stripHeightPx).toString("base64"));
+	for (let top = 0; top < raster.heightPx; top += height) {
+		const rgba = Buffer.alloc(height * stride);
+		for (let y = 0; y < height && top + y < raster.heightPx; y++) {
+			raster.pixels.copy(rgba, y * stride, (top + y) * sourceStride, (top + y) * sourceStride + copyBytes);
+		}
+		strips.push(encodePng(rgba, width, height).toString("base64"));
 	}
 	return strips;
 }

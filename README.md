@@ -9,6 +9,8 @@ Each closed ```` ```mermaid ```` fence in a user or assistant message becomes a 
 3. resvg rasterizes it to transparent pixels.
 4. The pixels are cut into strips two terminal rows tall, and pi-tui's `Image` component draws each strip with the Kitty graphics protocol.
 
+Diagrams are rasterized at the cell size the terminal reports, so each strip is exactly `columns x cellWidth` by `2 x cellHeight` pixels and the terminal draws it 1:1. No resampling blurs the labels, and strips meet without seams. A narrower pane re-rasterizes at a smaller scale instead of shrinking the image.
+
 Labels are set in a monospace font and measured in terminal cells, so a label of N characters spans N columns, the same as the text around it. Spacing between nodes and ranks is tighter than Pele's defaults; a diagram's own frontmatter `config` still overrides it. Diagrams shrink to fit narrow panes.
 
 Strips keep a diagram visible while it scrolls. A Kitty image only shows while its first row is on screen, and pi-tui re-places a partly scrolled image only for full-width scroll views, which layouts with a gutter (such as pi-geek-tui fullscreen) are not. With strips, at most one strip at the top edge is hidden.
