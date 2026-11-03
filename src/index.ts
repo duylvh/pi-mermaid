@@ -100,16 +100,22 @@ function codeSpan(content: string): string {
 	return `${fence}${pad}${content}${pad}${fence}`;
 }
 
-const asParagraph = (lines: string[]) => `${lines.map((line) => codeSpan(line || "\u00a0")).join("  \n")}\n\n`;
+const escapeMarkdown = (text: string) => text.replace(/[!-/:-@[-`{-~]/g, "\\$&");
+
+/** Blank rows that keep their height: a line of only a no-break space is not a blank Markdown line. */
+const reservedRows = (count: number) => `${Array.from({ length: Math.max(1, count) }, () => "\u00a0").join("  \n")}\n\n`;
 
 /**
- * The Markdown component keeps a block with an image sequence as one unsplit row, so the sequence
- * gets its own paragraph. The blank row Markdown puts between paragraphs is the first reserved row.
+ * The Markdown component keeps a block with an image sequence as one unsplit row, so the sequence gets
+ * its own paragraph, and the blank row Markdown puts between paragraphs is the first reserved row. The
+ * sequence sits in a code span because themes style a code span as one unit, while text styling such
+ * as number highlighting would split it. Reserved rows stay plain text so themes that decorate code
+ * spans draw nothing on them.
  */
 function imageMarkdown(lines: string[]): string {
-	const [first = "", ...reserved] = lines;
-	if (!first.includes("\x1b_G")) return asParagraph(lines);
-	return `${codeSpan(`\u00a0${first}`)}\n\n${asParagraph(reserved.slice(1).length ? reserved.slice(1) : [""])}`;
+	const [first = "", ...rest] = lines;
+	if (!first.includes("\x1b_G")) return `${lines.map(codeSpan).join("  \n")}\n\n`;
+	return `${codeSpan(`\u00a0${first}`)}\n\n${reservedRows(rest.length - 1)}`;
 }
 
 /** Columns that make diagram text about as tall as terminal text. */
@@ -165,7 +171,7 @@ export default function piMermaid(pi: ExtensionAPI) {
 				});
 				if (!rendered.ok) {
 					if (context.isStreaming) return token.raw;
-					return `${token.raw}\n${asParagraph([theme.fg("warning", `Mermaid diagram not rendered: ${rendered.error}`)])}`;
+					return `${token.raw}\n\n${theme.fg("warning", escapeMarkdown(`Mermaid diagram not rendered: ${rendered.error}`))}\n\n`;
 				}
 				const { diagram } = rendered;
 				const imageKey = `${context.messageId ?? "live"}|${ordinal++}|${key}`;

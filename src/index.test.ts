@@ -27,8 +27,8 @@ beforeAll(async () => {
 	setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 });
 
-function renderMessage(text: string, overrides: Partial<MarkdownTransformContext> = {}, width = 100): string[] {
-	const markdown = new Markdown(text, 1, 0, getMarkdownTheme(), undefined, {
+function renderMessage(text: string, overrides: Partial<MarkdownTransformContext> = {}, width = 100, markdownTheme = getMarkdownTheme()): string[] {
+	const markdown = new Markdown(text, 1, 0, markdownTheme, undefined, {
 		transform: (md, availableWidth) =>
 			transform(md, { messageType: "assistant", isStreaming: false, availableWidth, ...overrides }),
 	});
@@ -92,4 +92,13 @@ test("the diagram follows the live theme, including one swapped in after session
 		ui.theme = getThemeByName("dark")!;
 	}
 	expect(payload()).toBe(dark);
+});
+
+test("themes that decorate inline code draw nothing on the rows an image covers", () => {
+	const backtickedCode = { ...getMarkdownTheme(), code: (text: string) => `\`${text}\`` };
+	const lines = renderMessage(FLOWCHART, {}, 100, backtickedCode);
+	const start = lines.findIndex(isImageLine);
+	const rows = Number(/\x1b_G[^;]*\br=(\d+)/.exec(lines[start]!)?.[1]);
+	const covered = lines.slice(start + 1, start + rows).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trim());
+	expect(covered.every((line) => line === "")).toBe(true);
 });
