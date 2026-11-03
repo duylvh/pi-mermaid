@@ -43,7 +43,7 @@ test("a mermaid block renders as one kitty image with reserved rows, keeping sur
 	const start = lines.indexOf(imageLines[0]!);
 	expect(rows).toBeGreaterThan(3);
 	expect(lines.every((line) => !line.includes("\n"))).toBe(true);
-	expect(lines.slice(start + 1, start + rows).every((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trim() === "")).toBe(true);
+	expect(lines.slice(start + 1, start + rows).every((line) => line.replace(/\x1b\[[0-9;]*m|\u2800/g, "").trim() === "")).toBe(true);
 	expect(lines[start + rows]!.trim()).toBe("");
 	expect(lines[start + rows + 1]).toContain("After");
 	expect(lines.join("\n")).toContain("Before");
@@ -99,6 +99,14 @@ test("themes that decorate inline code draw nothing on the rows an image covers"
 	const lines = renderMessage(FLOWCHART, {}, 100, backtickedCode);
 	const start = lines.findIndex(isImageLine);
 	const rows = Number(/\x1b_G[^;]*\br=(\d+)/.exec(lines[start]!)?.[1]);
-	const covered = lines.slice(start + 1, start + rows).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trim());
+	const covered = lines.slice(start + 1, start + rows).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\u2800/g, "").trim());
 	expect(covered.every((line) => line === "")).toBe(true);
+});
+
+test("a diagram that ends a message keeps its height when trailing blank rows are trimmed", () => {
+	const lines = renderMessage(FLOWCHART);
+	while (lines.length && lines.at(-1)!.replace(/\x1b\[[0-9;]*m/g, "").trim() === "") lines.pop();
+	const start = lines.findIndex(isImageLine);
+	const rows = Number(/\x1b_G[^;]*\br=(\d+)/.exec(lines[start]!)?.[1]);
+	expect(lines.length - start).toBeGreaterThanOrEqual(rows);
 });

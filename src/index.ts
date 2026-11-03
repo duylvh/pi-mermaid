@@ -102,8 +102,11 @@ function codeSpan(content: string): string {
 
 const escapeMarkdown = (text: string) => text.replace(/[!-/:-@[-`{-~]/g, "\\$&");
 
-/** Blank rows that keep their height: a line of only a no-break space is not a blank Markdown line. */
-const reservedRows = (count: number) => `${Array.from({ length: Math.max(1, count) }, () => "\u00a0").join("  \n")}\n\n`;
+/**
+ * Rows under an image hold U+2800, which draws nothing but is not whitespace: Markdown keeps the line, and
+ * renderers that trim trailing blank rows with `trim()` (pi-geek-tui does) keep the image's height.
+ */
+const reservedRows = (count: number) => `${Array.from({ length: Math.max(1, count) }, () => "\u2800").join("  \n")}\n\n`;
 
 /**
  * The Markdown component keeps a block with an image sequence as one unsplit row, so the sequence gets
