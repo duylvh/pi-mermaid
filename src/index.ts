@@ -104,8 +104,15 @@ function codeSpan(content: string): string {
 
 const escapeMarkdown = (text: string) => text.replace(/[!-/:-@[-`{-~]/g, "\\$&");
 
+/** Largest zoom over terminal-sized text: a diagram grows with the pane up to this, then stops. */
+const MAX_ZOOM = 1.5;
+
 /** Columns at which diagram text is exactly terminal text: one character per cell. */
 const naturalColumns = (layout: Layout) => Math.max(1, Math.ceil(layout.width / UNITS_PER_CELL));
+
+/** Fill the pane up to MAX_ZOOM; shrink below terminal-sized text only when the pane is narrower. */
+const fittedColumns = (layout: Layout, availableWidth: number) =>
+	Math.max(1, Math.min(availableWidth - 1, Math.round(naturalColumns(layout) * MAX_ZOOM)));
 
 /**
  * A diagram is drawn as a stack of short image strips rather than one tall image. A Kitty image only
@@ -140,6 +147,16 @@ function createStrips(layout: Layout, columns: number, fallbackColor: (text: str
 export default function piMermaid(pi: ExtensionAPI) {
 	let ui: { readonly theme: Theme } | undefined;
 	let warnedAboutCore = false;
+
+	// Rex drops uploaded Kitty image data when a pane is resized, while pi-tui only re-places images it
+	// already uploaded. Invalidated strips register a new transmission, so pi-tui uploads them again.
+	const reuploadStrips = () => {
+		for (const strips of stripImages.values()) for (const strip of strips) strip.invalidate();
+	};
+	process.stdout.on("resize", reuploadStrips);
+	pi.on("session_shutdown", () => {
+		process.stdout.off("resize", reuploadStrips);
+	});
 
 	pi.on("session_start", (_event, ctx) => {
 		ui = ctx.ui;
@@ -180,7 +197,7 @@ export default function piMermaid(pi: ExtensionAPI) {
 					return `${token.raw}\n\n${theme.fg("warning", escapeMarkdown(`Mermaid diagram not rendered: ${laid.error}`))}\n\n`;
 				}
 				const { layout } = laid;
-				const columns = Math.max(1, Math.min(naturalColumns(layout), context.availableWidth - 1));
+				const columns = fittedColumns(layout, context.availableWidth);
 				const cell = getCellDimensions();
 				const stripsKey = `${context.messageId ?? "live"}|${ordinal++}|${columns}|${cell.widthPx}x${cell.heightPx}|${key}`;
 				const strips = remember(stripImages, stripsKey, () => createStrips(layout, columns, (s) => theme.fg("muted", s)));

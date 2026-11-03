@@ -74,13 +74,13 @@ try {
 
 const ui = { theme: entries[0]!.theme, notify() {} };
 let transform!: MarkdownTransformer;
-let onSessionStart!: (event: unknown, ctx: unknown) => void;
+const handlers: Record<string, (event: unknown, ctx: unknown) => void> = {};
 piMermaid({
-	on: (_: string, handler: typeof onSessionStart) => (onSessionStart = handler),
+	on: (name: string, handler: (event: unknown, ctx: unknown) => void) => (handlers[name] = handler),
 	registerMarkdownTransformer: (t: MarkdownTransformer) => (transform = t),
 	getSettings: () => ({ markdown: { mermaid: "off" } }),
 } as never);
-onSessionStart({}, { ui });
+handlers.session_start!({}, { ui });
 setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 
 type Strip = { data: string; height: number };
