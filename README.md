@@ -11,7 +11,9 @@ Each closed ```` ```mermaid ```` fence in a user or assistant message becomes a 
 
 Diagrams are rasterized at the cell size the terminal reports, so each strip is exactly `columns x cellWidth` by `2 x cellHeight` pixels and the terminal draws it 1:1. No resampling blurs the labels, and strips meet without seams. A narrower pane re-rasterizes at a smaller scale instead of shrinking the image.
 
-Labels are set in a monospace font and measured in terminal cells, so a label of N characters spans N columns, the same as the text around it. Spacing between nodes and ranks is tighter than Pele's defaults; a diagram's own frontmatter `config` still overrides it. Diagrams shrink to fit narrow panes.
+Labels are set in a monospace font and measured in terminal cells. A diagram grows with the pane up to 1.5x terminal-text size (a label of N characters spans up to 1.5N columns), and shrinks below that only when the pane is narrower. Spacing between nodes and ranks is tighter than Pele's defaults; a diagram's own frontmatter `config` still overrides it. Diagrams shrink to fit narrow panes.
+
+Some terminals, Rex among them, drop uploaded image data when a pane is resized, while pi-tui only re-places images it already uploaded. pi-mermaid re-registers every strip on resize, so pi-tui uploads them again and diagrams stay visible through width and height changes.
 
 Strips keep a diagram visible while it scrolls. A Kitty image only shows while its first row is on screen, and pi-tui re-places a partly scrolled image only for full-width scroll views, which layouts with a gutter (such as pi-geek-tui fullscreen) are not. With strips, at most one strip at the top edge is hidden.
 
