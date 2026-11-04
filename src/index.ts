@@ -1,5 +1,6 @@
 import type { ExtensionAPI, MarkdownTransformContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Color, colorToHex, colorToOklch, getCapabilities, getCellDimensions, Marked } from "@earendil-works/pi-tui";
+import { crc32 } from "node:zlib";
 import { DIACRITICS } from "./diacritics.ts";
 import { encodeCanvas, type Layout, layoutDiagram, MONO_ADVANCE, PELE_FONT_SIZE, type Palette, rasterize } from "./render.ts";
 
@@ -22,7 +23,7 @@ interface Diagram {
 }
 const diagrams = new Map<string, Diagram>();
 
-function remember<V>(cache: Map<string, V>, key: string, make: () => V, evict?: (value: V) => void): V {
+function remember<V>(cache: Map<string, V>, key: string, make: () => V): V {
 	const hit = cache.get(key);
 	if (hit !== undefined) {
 		cache.delete(key);
@@ -32,9 +33,7 @@ function remember<V>(cache: Map<string, V>, key: string, make: () => V, evict?: 
 	const value = make();
 	cache.set(key, value);
 	if (cache.size > CACHE_LIMIT) {
-		const oldest = cache.keys().next().value!;
-		evict?.(cache.get(oldest)!);
-		cache.delete(oldest);
+		cache.delete(cache.keys().next().value!);
 	}
 	return value;
 }
@@ -190,12 +189,12 @@ function drawsPlaceholders(): boolean {
 }
 
 /** Rasterized at exactly the terminal's cell size, so the terminal shows every pixel 1:1. */
-function createDiagram(layout: Layout, { scale, columns }: Fit): Diagram {
+function createDiagram(key: string, layout: Layout, { scale, columns }: Fit): Diagram {
 	const cell = getCellDimensions();
 	const raster = rasterize(layout, scale);
 	const rows = Math.min(MAX_PLACEHOLDER_CELLS, Math.max(1, Math.ceil(raster.heightPx / cell.heightPx)));
 	return {
-		id: 1 + Math.floor(Math.random() * 0xfffffe),
+		id: 1 + (crc32(key) % 0xfffffe),
 		png: encodeCanvas(raster, columns * cell.widthPx, rows * cell.heightPx),
 		columns,
 		rows,
@@ -208,10 +207,14 @@ export default function piMermaid(pi: ExtensionAPI) {
 
 	// Image data lives in the terminal, outside pi-tui's frames, so it is written directly. Rex drops
 	// uploaded image data when a pane is resized, so every live diagram is uploaded again then.
+	// pi-tui keeps rendered lines for scrollback without transforming again, so an image leaves the
+	// terminal only at shutdown, never when its PNG leaves the cache.
 	const uploaded = new Set<number>();
+	const sent = new Set<number>();
 	const upload = (diagram: Diagram) => {
 		if (uploaded.has(diagram.id)) return;
 		uploaded.add(diagram.id);
+		sent.add(diagram.id);
 		process.stdout.write(uploadSequence(diagram));
 	};
 	// pi-tui asks for the cell size only at startup, but a pane's cells change size when it first shows
@@ -222,14 +225,12 @@ export default function piMermaid(pi: ExtensionAPI) {
 		for (const diagram of diagrams.values()) upload(diagram);
 		process.stdout.write(CELL_SIZE_QUERY);
 	};
-	const forget = (diagram: Diagram) => {
-		uploaded.delete(diagram.id);
-		process.stdout.write(deleteSequence(diagram.id));
-	};
 	process.stdout.on("resize", reupload);
 	pi.on("session_shutdown", () => {
 		process.stdout.off("resize", reupload);
-		for (const diagram of diagrams.values()) forget(diagram);
+		for (const id of sent) process.stdout.write(deleteSequence(id));
+		sent.clear();
+		uploaded.clear();
 		diagrams.clear();
 	});
 
@@ -285,7 +286,7 @@ export default function piMermaid(pi: ExtensionAPI) {
 				const size = { scale, columns: columnsOf(layout) };
 				const key = `${paletteKey}|${spread}|${source}`;
 				const diagramKey = `${size.scale}|${cell.widthPx}x${cell.heightPx}|${key}`;
-				const diagram = remember(diagrams, diagramKey, () => createDiagram(layout, size), forget);
+				const diagram = remember(diagrams, diagramKey, () => createDiagram(diagramKey, layout, size));
 				upload(diagram);
 				return diagramMarkdown(diagram);
 			})

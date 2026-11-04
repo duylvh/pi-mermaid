@@ -89,6 +89,19 @@ test("each image is uploaded once, and again after a resize", () => {
 	expect(terminal.join("")).toContain("\x1b[16t");
 });
 
+test("a message kept for scrollback still has its image after many later diagrams", () => {
+	const message = new Markdown(flowchart("Scrolled back"), 1, 0, getMarkdownTheme(), undefined, {
+		transform: (md, availableWidth) => transform(md, { messageType: "assistant", isStreaming: false, availableWidth }),
+	});
+	const shown = message.render(100);
+	for (let i = 0; i < 40; i++) renderMessage(flowchart(`Later ${i}`));
+	const [, r, g, b] = /\x1b\[38;2;(\d+);(\d+);(\d+)m\u{10eeee}/u.exec(message.render(100).join(""))!.map(Number);
+	const id = (r! << 16) | (g! << 8) | b!;
+	expect(message.render(100)).toBe(shown);
+	expect(uploads().some((upload) => upload.id === id)).toBe(true);
+	expect(terminal.join("")).not.toContain(`a=d,d=I,i=${id},`);
+});
+
 test("images are drawn pixel for pixel at any terminal cell size", () => {
 	const original = getCellDimensions();
 	try {
